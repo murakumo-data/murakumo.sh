@@ -1,0 +1,79 @@
+name: Publish murakumo.sh
+
+# Copies the installer murakumo.ai serves (website/home/install.sh in murakumo-data/murakumo,
+# tested there before it is published) and serves it at https://murakumo.sh. Runs every hour and
+# publishes only when the installer has changed.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Publish even if the installer has not changed
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Fetch the installer
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.compare.outputs.changed }}
+    steps:
+      - name: Fetch it from murakumo.ai
+        run: |
+          mkdir -p _site
+          curl -fsSL --retry 3 https://murakumo.ai/install.sh -o _site/install.sh
+          head -1 _site/install.sh | grep -qx '#!/bin/sh'
+          sh -n _site/install.sh
+          grep -q '^main "\$@"$' _site/install.sh
+      - name: Build the site
+        run: |
+          # The address itself serves the installer, so `curl murakumo.sh | sh` works. Its second
+          # line does nothing in a shell, and sends a browser to the install docs.
+          {
+            head -1 _site/install.sh
+            echo ": '<meta http-equiv=\"refresh\" content=\"0; url=https://murakumo.ai/docs/setup/\">'"
+            tail -n +2 _site/install.sh
+          } > _site/index.html
+          sh -n _site/index.html
+          printf 'User-agent: *\nDisallow:\n' > _site/robots.txt
+      - id: compare
+        name: Compare with what murakumo.sh serves
+        run: |
+          live=$(curl -fsS --max-time 20 https://murakumo.sh/install.sh || true)
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.force }}" = "true" ] || [ "$live" != "$(cat _site/install.sh)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "murakumo.sh already serves this installer"
+          fi
+      - if: steps.compare.outputs.changed == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Publish to GitHub Pages
+    needs: build
+    if: needs.build.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
